@@ -6,10 +6,11 @@ O projeto usa o **Qwen2.5-1.5B-Instruct** pré-treinado pelo Qwen. O tokenizador
 
 ## O que aparece no terminal
 
-1. **Tokenização.** O script aplica o template de conversa do Qwen e exibe os tokens do prompt, seus IDs e o texto reconstruído.
+1. **Tokenização.** O script aplica o template de conversa do Qwen e exibe os tokens do prompt e seus IDs.
 2. **Embeddings.** O script consulta o vetor de entrada de cada token e imprime as dimensões do tensor e os primeiros valores de cada vetor.
 3. **Passagem pelo modelo.** O script mostra os estados ocultos e usa a similaridade de cosseno para comparar a representação inicial e final do último token do prompt.
-4. **Geração.** A cada passo, o script aplica temperatura e softmax aos logits, exibe os cinco tokens mais prováveis e mostra o token escolhido. A resposta parcial volta para a sequência de entrada do passo seguinte.
+4. **Contexto da conversa.** O terminal mostra o orçamento do prompt, quantos tokens estão em uso e quantos turnos anteriores cabem. O script mantém a mensagem de sistema, a pergunta atual e os turnos completos mais recentes que cabem no orçamento.
+5. **Geração com KV cache.** A primeira passagem processa o prompt inteiro e guarda as chaves e os valores de atenção. A cada passo seguinte, o script reaproveita esse cache e envia ao modelo só o token novo. O terminal mostra os candidatos mais prováveis e o token escolhido.
 
 ## Como rodar
 
@@ -37,8 +38,14 @@ No Linux ou macOS, use o Python do ambiente virtual.
 
 ## Exemplo de execução
 
-Digite `Quanto e 2 mais 2?` para acompanhar a geração. Em uma execução local, o texto final foi `2 + 2 é igual a 4.` Com a amostragem ativada, o resultado pode variar. Digite `sair` para encerrar.
+Digite `Quanto e 2 mais 2?` e depois `Some 1 ao resultado anterior.` para acompanhar como o histórico entra no novo prompt. As mensagens ficam em memória durante a sessão.
+
+- `historico` exibe as mensagens da sessão.
+- `limpar` reinicia a conversa com a mensagem de sistema.
+- `sair` encerra o programa.
 
 ## Configuração do experimento
 
-As variáveis no início de `main.py` definem a temperatura, o limite de novos tokens e quantos candidatos aparecem na saída. A configuração inicial usa temperatura `0.2`, gera até `15` tokens e exibe os `5` candidatos mais prováveis por passo. Com temperatura `0`, o script escolhe sempre o token de maior pontuação. A lista de candidatos serve para inspeção. Com temperatura positiva, a amostragem considera a distribuição de todo o vocabulário.
+Por padrão, a janela de contexto é de `1024` tokens, com `128` reservados para a resposta e `896` disponíveis para o prompt. As variáveis no início de `main.py` permitem ajustar esses limites e ligar ou desligar a inspeção e a lista de candidatos.
+
+A temperatura inicial é `0.7` e ajusta as probabilidades exibidas. O script usa `argmax` para escolher o token de maior probabilidade e mostra, por padrão, os `5` candidatos mais prováveis a cada passo.

@@ -1,4 +1,4 @@
-
+import traceback
 import torch
 from transformers import (
     AutoTokenizer,
@@ -6,13 +6,36 @@ from transformers import (
     AutoModelForCausalLM
 )
 
-# CONFIGURAÇÃO INICIAL
+# ==========================================
+# CONFIGURAÇÃO
+# ==========================================
 
 modelo_id = "Qwen/Qwen2.5-1.5B-Instruct"
 
-temperatura = 0.2
-max_new_tokens = 15
+temperatura = 0.7
+max_new_tokens = 128
+janela_contexto = 1024
 top_k_visualizacao = 5
+
+mostrar_inspecao = True
+mostrar_top5 = True
+
+system_msg = (
+    "Você é um assistente de IA chamado LLMemCasa. "
+    "Responda em português brasileiro, de maneira "
+    "clara, objetiva e tecnicamente precisa. "
+    "Considere as mensagens anteriores da conversa."
+)
+
+if janela_contexto <= max_new_tokens:
+    raise ValueError(
+        "A janela de contexto precisa ser maior "
+        "que max_new_tokens."
+    )
+
+# ==========================================
+# CARREGAMENTO
+# ==========================================
 
 print("Carregando tokenizador...")
 tokenizer = AutoTokenizer.from_pretrained(modelo_id)
@@ -20,7 +43,7 @@ tokenizer = AutoTokenizer.from_pretrained(modelo_id)
 print("Carregando configuração...")
 config = AutoConfig.from_pretrained(modelo_id)
 
-print("Carregando pesos do modelo...")
+print("Carregando pesos...")
 model = AutoModelForCausalLM.from_pretrained(
     modelo_id,
     dtype=torch.float32
@@ -28,9 +51,7 @@ model = AutoModelForCausalLM.from_pretrained(
 
 model.eval()
 
-# INFORMAÇÕES DA ARQUITETURA
-
-print("\n--- CONFIGURAÇÃO DO MODELO ---")
+print("\n--- ARQUITETURA ---")
 print("Dimensão oculta:", config.hidden_size)
 print("Camadas:", config.num_hidden_layers)
 print("Cabeças de atenção:", config.num_attention_heads)
@@ -39,49 +60,32 @@ print("Vocabulário:", config.vocab_size)
 
 print("\n--- HARDWARE ---")
 print("PyTorch:", torch.__version__)
-print("CUDA disponível:", torch.cuda.is_available())
+print("CUDA:", torch.cuda.is_available())
 
-print("\n--- CONFIGURAÇÃO DA GERAÇÃO ---")
-print("Temperatura:", temperatura)
-print("Máximo de novos tokens:", max_new_tokens)
+print("\n--- CONTEXTO ---")
+print("Janela:", janela_contexto)
+print("Reserva de geração:", max_new_tokens)
+print(
+    "Orçamento do prompt:",
+    janela_contexto - max_new_tokens
+)
 
-# LOOP INTERATIVO
+# ==========================================
+# HISTÓRICO EM RAM
+# ==========================================
 
-while True:
+historico = [
+    {
+        "role": "system",
+        "content": system_msg
+    }
+]
 
-    texto = input("\nDigite um texto (ou 'sair'): ")
+# ==========================================
+# FUNÇÕES DE CONTEXTO
+# ==========================================
 
-    if texto.lower() == "sair":
-        break
-
-    if not texto.strip():
-        continue
-
-    # CONSTRUÇÃO DO PROMPT CONVERSACIONAL
-
-    mensagens = [
-        {
-            "role": "system",
-            "content": (
-                    """
-                    Responda diretamente às perguntas do usuário.
-                    Quando receber uma frase incompleta, pergunte se ele
-                    deseja completá-la ou, se a intenção estiver clara,
-                    continue a frase.
-
-                    Não invente fatos quando não souber a resposta.
-                    Quando precisar de informações externas, informe
-                    que não possui acesso a elas.
-
-                    Evite respostas excessivamente longas.
-                    """
-            )
-        },
-        {
-            "role": "user",
-            "content": texto
-        }
-    ]
+def tokenizar_mensagens(mensagens):
 
     prompt = tokenizer.apply_chat_template(
         mensagens,
@@ -95,29 +99,147 @@ while True:
         add_special_tokens=False
     )
 
-    ids = inputs["input_ids"][0].tolist()
+    return inputs["input_ids"]
 
-    # TOKENIZAÇÃO
 
-    # Tokens do prompt completo, incluindo os marcadores
-    # especiais de system, user e assistant.
-    tokens = tokenizer.convert_ids_to_tokens(ids)
+
+def preparar_contexto(historico):
+
+    # Espaço reservado para a geração.
+    limite_prompt = janela_contexto - max_new_tokens
+
+    if limite_prompt <= 0:
+        raise ValueError(
+            "A janela de contexto deve ser maior "
+            "que max_new_tokens."
+        )
+
+    # A primeira mensagem é o system prompt.
+    system = historico[0]
+
+    # A última mensagem é a pergunta atual.
+    atual = historico[-1]
+
+    # Começamos com as mensagens obrigatórias.
+    selecionadas = [system, atual]
+
+    # Verificar se o mínimo obrigatório cabe.
+    ids = tokenizar_mensagens(selecionadas)
+
+    if ids.shape[1] > limite_prompt:
+        raise ValueError(
+            f"System + mensagem atual ocupam "
+            f"{ids.shape[1]} tokens, mas o limite "
+            f"é {limite_prompt}."
+        )
+
+    # Mensagens anteriores, sem system e sem
+    # a pergunta atual.
+    anteriores = historico[1:-1]
+
+    # O histórico deve conter turnos completos:
+    # user, assistant, user, assistant...
+    if len(anteriores) % 2 != 0:
+        raise ValueError(
+            "Histórico inconsistente: existe "
+            "um turno anterior incompleto."
+        )
+
+    # Agrupar em pares user + assistant.
+    turnos = []
+
+    for i in range(0, len(anteriores), 2):
+
+        usuario = anteriores[i]
+        assistente = anteriores[i + 1]
+
+        if (
+            usuario["role"] != "user"
+            or assistente["role"] != "assistant"
+        ):
+            raise ValueError(
+                "Ordem inválida no histórico."
+            )
+
+        turnos.append([usuario, assistente])
+
+    # Inserir turnos do mais recente
+    # para o mais antigo.
+    turnos_selecionados = []
+
+    for turno in reversed(turnos):
+
+        candidato_turnos = [
+            turno,
+            *turnos_selecionados
+        ]
+
+        candidato = [system]
+
+        for par in candidato_turnos:
+            candidato.extend(par)
+
+        candidato.append(atual)
+
+        ids_teste = tokenizar_mensagens(
+            candidato
+        )
+
+        if ids_teste.shape[1] <= limite_prompt:
+            turnos_selecionados = candidato_turnos
+        else:
+            # Preserva a sequência recente e
+            # descarta os turnos mais antigos.
+            break
+
+    # Reconstruir o contexto final.
+    selecionadas = [system]
+
+    for turno in turnos_selecionados:
+        selecionadas.extend(turno)
+
+    selecionadas.append(atual)
+
+    ids = tokenizar_mensagens(selecionadas)
+
+    print("\n--- GERENCIADOR DE CONTEXTO ---")
+    print("Tokens utilizados:", ids.shape[1])
+    print("Orçamento do prompt:", limite_prompt)
+    print("Turnos anteriores disponíveis:", len(turnos))
+    print("Turnos anteriores incluídos:", len(turnos_selecionados))
+    print(
+        "Turnos descartados:",
+        len(turnos) - len(turnos_selecionados)
+    )
+
+    return ids, selecionadas
+
+# ==========================================
+# INSPEÇÃO DO FORWARD PASS
+# ==========================================
+
+def inspecionar_forward(ids, outputs):
+
+    tokens_ids = ids[0].tolist()
+
+    tokens = tokenizer.convert_ids_to_tokens(
+        tokens_ids
+    )
 
     print("\n--- TOKENIZAÇÃO ---")
 
-    for token, token_id in zip(tokens, ids):
-        print(f"{token!r:25} -> ID: {token_id}")
-
-    print("\nQuantidade de tokens:", len(ids))
-
-    print("\n--- PROMPT RECONSTRUÍDO ---")
-    print(tokenizer.decode(ids))
-
-    # EMBEDDING LOOKUP
+    for token, token_id in zip(
+        tokens,
+        tokens_ids
+    ):
+        print(
+            f"{token!r:25} -> ID: {token_id}"
+        )
 
     with torch.inference_mode():
+
         embeddings = model.get_input_embeddings()(
-            inputs["input_ids"]
+            ids
         )
 
     print("\n--- EMBEDDINGS ---")
@@ -126,213 +248,313 @@ while True:
     for i, token in enumerate(tokens):
 
         print(f"\nToken {i}: {token!r}")
-        print("Primeiros 10 valores:")
-        print(embeddings[0, i, :10])
-
-    # FORWARD PASS
-
-    print("\n--- FORWARD PASS ---")
-
-    with torch.inference_mode():
-        outputs = model(
-            **inputs,
-            output_hidden_states=True,
-            use_cache=False,
-            return_dict=True
+        print(
+            "Primeiros 10 valores:",
+            embeddings[0, i, :10]
         )
 
     hidden_states = outputs.hidden_states
 
-    print("Quantidade de estados:", len(hidden_states))
+    print("\n--- FORWARD PASS ---")
+    print(
+        "Quantidade de estados:",
+        len(hidden_states)
+    )
 
     for i, estado in enumerate(hidden_states):
 
-        # Último token da sequência
         vetor = estado[0, -1, :]
 
         print(f"\nEstado {i:02d}")
         print("Shape:", tuple(estado.shape))
-        print("Primeiros 5 valores:", vetor[:5].tolist())
+        print(
+            "Primeiros 5 valores:",
+            vetor[:5].tolist()
+        )
 
-    # COMPARAÇÃO DE REPRESENTAÇÕES
+    inicial = hidden_states[0][0, -1, :]
+    final = hidden_states[-1][0, -1, :]
 
-    # Comparar o mesmo token no começo e no final
-    # do processamento pelas camadas.
-    indice_token = -1
-
-    inicial = hidden_states[0][0, indice_token, :]
-    final = hidden_states[-1][0, indice_token, :]
-
-    similaridade = torch.nn.functional.cosine_similarity(
-        inicial.unsqueeze(0).float(),
-        final.unsqueeze(0).float()
+    similaridade = (
+        torch.nn.functional.cosine_similarity(
+            inicial.unsqueeze(0).float(),
+            final.unsqueeze(0).float()
+        )
     )
 
     print("\n--- COMPARAÇÃO ---")
-    print("Token analisado:", repr(tokens[indice_token]))
+    print("Token:", repr(tokens[-1]))
+    print("Inicial:", inicial[:10])
+    print("Final:", final[:10])
+    print(
+        "Similaridade:",
+        similaridade.item()
+    )
 
-    print("Primeiros 10 valores iniciais:")
-    print(inicial[:10])
 
-    print("Primeiros 10 valores finais:")
-    print(final[:10])
+# ==========================================
+# GERAÇÃO COM KV CACHE
+# ==========================================
 
-    print("Similaridade de cosseno:", similaridade.item())
+def gerar_resposta(ids):
 
-    # GERAÇÃO AUTORREGRESSIVA
+    tamanho_prompt = ids.shape[1]
 
-    print("\n--- GERAÇÃO ---")
+    attention_mask = torch.ones_like(ids)
 
-    ids_gerados = inputs["input_ids"].clone()
+    print("\n--- PREFILL ---")
+    print("Tokens de entrada:", tamanho_prompt)
 
-    # O primeiro forward pass já foi realizado acima.
-    # Reutilizamos seus logits para gerar o primeiro token.
+    # Primeiro forward:
+    # processa todo o prompt e constrói o cache.
+    with torch.inference_mode():
+
+        outputs = model(
+            input_ids=ids,
+            attention_mask=attention_mask,
+            use_cache=True,
+            output_hidden_states=mostrar_inspecao,
+            return_dict=True
+        )
+
+    if mostrar_inspecao:
+        inspecionar_forward(ids, outputs)
+
+    # Cache das 28 camadas Transformer.
+    cache = outputs.past_key_values
+
     logits_atuais = outputs.logits[0, -1, :]
 
-    # IDs que pertencem somente à resposta do assistente
     ids_resposta = []
 
-    # Qwen usa im_end para encerrar uma mensagem.
-    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    im_end_id = tokenizer.convert_tokens_to_ids(
+        "<|im_end|>"
+    )
 
     ids_fim = {
         token_id
-        for token_id in [tokenizer.eos_token_id, im_end_id]
-        if token_id is not None
+        for token_id in [
+            tokenizer.eos_token_id,
+            im_end_id
+        ]
+        if isinstance(token_id, int)
+        and token_id >= 0
     }
+
+    print("\n--- KV CACHE ---")
+    print("Tipo:", type(cache).__name__)
+
+    # Inspecionar tamanho do cache, quando
+    # disponível na versão do Transformers.
+    if hasattr(cache, "get_seq_length"):
+        print(
+            "Tokens armazenados:",
+            cache.get_seq_length()
+        )
+
+    print("\n--- GERAÇÃO ---")
 
     for passo in range(max_new_tokens):
 
-        # LOGITS
+        # LOGITS -> TEMPERATURA -> SOFTMAX -> ARGMAX
 
-        print(f"\n--- PASSO {passo + 1} ---")
-        print("Shape dos logits:", tuple(logits_atuais.shape))
+        logits_ajustados = logits_atuais / temperatura
 
-        # TEMPERATURA E SOFTMAX
-
-        if temperatura > 0:
-
-            logits_ajustados = logits_atuais / temperatura
-
-            probabilidades = torch.softmax(
-                logits_ajustados,
-                dim=-1
-            )
-
-            # Amostragem probabilística
-            proximo_id = torch.multinomial(
-                probabilidades,
-                num_samples=1
-            )
-
-        else:
-
-            # Temperatura 0: geração determinística
-            probabilidades = torch.softmax(
-                logits_atuais,
-                dim=-1
-            )
-
-            proximo_id = torch.argmax(
-                logits_atuais,
-                dim=-1,
-                keepdim=True
-            )
-
-        # TOP 5 TOKENS MAIS PROVÁVEIS
-
-        top_probs, top_ids = torch.topk(
-            probabilidades,
-            k=top_k_visualizacao
+        probabilidades = torch.softmax(
+            logits_ajustados,
+            dim=-1
         )
 
-        print("\nTop 5 probabilidades:")
+        # Escolher o token de maior probabilidade
+        proximo_id = torch.argmax(
+            probabilidades,
+            dim=-1,
+            keepdim=True
+        )
 
-        for posicao, (prob, token_id) in enumerate(
-            zip(top_probs, top_ids),
-            start=1
-        ):
+        # TOP 5
 
-            token = tokenizer.decode([token_id.item()])
+        if mostrar_top5:
+
+            top_probs, top_ids = torch.topk(
+                probabilidades,
+                k=top_k_visualizacao
+            )
 
             print(
-                f"{posicao}. {token!r:15} "
-                f"ID: {token_id.item():6} "
-                f"Probabilidade: {prob.item() * 100:.2f}%"
+                f"\n--- PASSO {passo + 1}: TOP 5 ---"
             )
 
-        # TOKEN SELECIONADO
+            for posicao, (prob, token_id) in enumerate(
+                zip(top_probs, top_ids),
+                start=1
+            ):
+
+                token = tokenizer.decode(
+                    [token_id.item()]
+                )
+
+                print(
+                    f"{posicao}. {token!r:15} "
+                    f"ID: {token_id.item():6} "
+                    f"Prob: {prob.item() * 100:.2f}%"
+                )
 
         token_id_escolhido = proximo_id.item()
-
-        token_escolhido = tokenizer.decode(
-            [token_id_escolhido]
-        )
-
-        prob_escolhida = probabilidades[
-            token_id_escolhido
-        ].item()
-
-        print("\nToken escolhido:", repr(token_escolhido))
-        print("ID:", token_id_escolhido)
-        print(
-            "Probabilidade:",
-            f"{prob_escolhida * 100:.2f}%"
-        )
-
-        # VERIFICAR FIM DA RESPOSTA
 
         if token_id_escolhido in ids_fim:
             print("\nFim da resposta detectado.")
             break
 
-        # ADICIONAR TOKEN À RESPOSTA
+        ids_resposta.append(
+            token_id_escolhido
+        )
 
-        ids_resposta.append(token_id_escolhido)
+        token_escolhido = tokenizer.decode(
+            [token_id_escolhido]
+        )
 
-        # ADICIONAR TOKEN À SEQUÊNCIA COMPLETA
+        print(
+            f"Passo {passo + 1}: "
+            f"{token_escolhido!r}"
+        )
 
-        ids_gerados = torch.cat(
+        # Último passo: não precisamos
+        # executar outro forward.
+        if passo == max_new_tokens - 1:
+            break
+
+        # A máscara deve acompanhar o
+        # crescimento da sequência.
+        attention_mask = torch.cat(
             [
-                ids_gerados,
-                proximo_id.reshape(1, 1)
+                attention_mask,
+                torch.ones(
+                    (1, 1),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device
+                )
             ],
             dim=1
         )
 
-        # EXIBIR RESPOSTA PARCIAL
-
-        resposta_parcial = tokenizer.decode(
-            ids_resposta,
-            skip_special_tokens=True
-        )
-
-        print("Resposta parcial:", resposta_parcial)
-
-        # EVITAR FORWARD PASS DESNECESSÁRIO
-        # NO ÚLTIMO PASSO
-
-        if passo == max_new_tokens - 1:
-            break
-
-        # PRÓXIMO FORWARD PASS
+        # DECODIFICAÇÃO COM CACHE
+        #
+        # Enviamos SOMENTE o token novo.
+        # O cache contém as Keys e Values
+        # dos tokens anteriores.
 
         with torch.inference_mode():
-            saida = model(
-                input_ids=ids_gerados,
-                use_cache=False,
+
+            outputs = model(
+                input_ids=proximo_id.reshape(1, 1),
+                attention_mask=attention_mask,
+                past_key_values=cache,
+                use_cache=True,
                 return_dict=True
             )
 
-        logits_atuais = saida.logits[0, -1, :]
+        cache = outputs.past_key_values
 
-    # RESULTADO FINAL
+        logits_atuais = outputs.logits[0, -1, :]
 
-    print("\n--- TEXTO FINAL ---")
-
-    resposta_final = tokenizer.decode(
+    resposta = tokenizer.decode(
         ids_resposta,
         skip_special_tokens=True
     )
 
-    print(resposta_final)
+    return resposta
+
+
+# ==========================================
+# LOOP INTERATIVO
+# ==========================================
+
+print("\n--- LLMemCasa iniciado ---")
+print("Comandos: sair, limpar, historico")
+
+while True:
+
+    texto = input("\nVocê: ").strip()
+
+    if texto.lower() == "sair":
+        break
+
+    if texto.lower() == "limpar":
+
+        historico = [
+            {
+                "role": "system",
+                "content": system_msg
+            }
+        ]
+
+        print("Histórico limpo.")
+        continue
+
+    if texto.lower() == "historico":
+
+        print("\n--- HISTÓRICO EM RAM ---")
+
+        for mensagem in historico:
+            print(
+                f"{mensagem['role']}: "
+                f"{mensagem['content']}"
+            )
+
+        continue
+
+    if not texto:
+        continue
+
+    # Adicionar mensagem atual
+    historico.append({
+        "role": "user",
+        "content": texto
+    })
+
+    try:
+
+        ids, mensagens_contexto = (
+            preparar_contexto(historico)
+        )
+
+        print("\n--- JANELA DE CONTEXTO ---")
+        print(
+            "Tokens do prompt:",
+            ids.shape[1]
+        )
+        print(
+            "Mensagens utilizadas:",
+            len(mensagens_contexto)
+        )
+        print(
+            "Mensagens totais:",
+            len(historico)
+        )
+
+        resposta = gerar_resposta(ids)
+
+
+    except Exception as erro:
+
+        historico.pop()
+
+        print("\n--- ERRO DETECTADO ---")
+
+        print("Tipo:", type(erro).__name__)
+
+        print("Representação:", repr(erro))
+
+        traceback.print_exc()
+
+        continue
+
+    # Guardar resposta no histórico
+    historico.append({
+        "role": "assistant",
+        "content": resposta
+    })
+
+    print("\n--- RESPOSTA FINAL ---")
+    print("LLMemCasa:", resposta)
