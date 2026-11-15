@@ -1,51 +1,47 @@
-# Criando uma LLM do zero para fins didáticos
+# LLMemCasa — Local LLMs on CPU
 
-O que acontece entre digitar um prompt e ver a resposta aparecer? O **LLMemCasa** é um laboratório de terminal para acompanhar como um modelo de linguagem gera texto, token por token.
+[Português](#português) · [English](#english)
 
-O projeto usa o **Qwen2.5-1.5B-Instruct** pré-treinado pelo Qwen. O tokenizador, a arquitetura e os pesos vêm do modelo. O código implementa o loop de geração em Python com PyTorch para mostrar como os logits viram probabilidades e como a escolha de um token influencia a próxima.
+## Português
 
-## O que aparece no terminal
+Dois experimentos de inferência local **só na CPU**. Na LLM caseira, o terminal mostra como um token é escolhido. No Huihui, o terminal recebe a resposta em streaming de um modelo de 27 bilhões de parâmetros quantizado em GGUF.
 
-1. **Tokenização.** O script aplica o template de conversa do Qwen e exibe os tokens do prompt e seus IDs.
-2. **Embeddings.** O script consulta o vetor de entrada de cada token e imprime as dimensões do tensor e os primeiros valores de cada vetor.
-3. **Passagem pelo modelo.** O script mostra os estados ocultos e usa a similaridade de cosseno para comparar a representação inicial e final do último token do prompt.
-4. **Contexto da conversa.** O terminal mostra o orçamento do prompt, quantos tokens estão em uso e quantos turnos anteriores cabem. O script mantém a mensagem de sistema, a pergunta atual e os turnos completos mais recentes que cabem no orçamento.
-5. **Geração com KV cache.** A primeira passagem processa o prompt inteiro e guarda as chaves e os valores de atenção. A cada passo seguinte, o script reaproveita esse cache e envia ao modelo só o token novo. O terminal mostra os candidatos mais prováveis e o token escolhido.
+| Módulo | O que faz |
+| --- | --- |
+| [LLM caseira](docs/llm-caseira.md#português) · `main.py` | Loop de geração implementado em Python com PyTorch e pesos pré-treinados do Qwen2.5-1.5B-Instruct. Mostra tokenização, embeddings, estados ocultos, KV cache e os tokens mais prováveis a cada passo. |
+| [Huihui abliterado](huihui/README.md#português) · `huihui/main.py` | Chat com o Huihui-Qwen3.8-27B-abliterated em GGUF `UD-IQ2_S`. O `llama.cpp` roda como servidor local e o cliente em Python exibe a resposta à medida que ela chega. |
 
-## Como rodar
-
-O projeto foi testado com Python 3.12 em CPU. Na primeira execução, o Hugging Face baixa e guarda em cache os arquivos do modelo. Depois disso, é possível executar com os arquivos em cache.
+Clone o repositório e siga o guia do módulo que você quer executar.
 
 ```sh
 git clone https://github.com/Gabriel-Camim/LLMemCasa.git
 cd LLMemCasa
-python -m venv .venv
 ```
 
-No Windows, execute estes comandos no PowerShell.
+### Hardware
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe main.py
-```
+Os dois módulos foram executados no Windows x64 em um **Intel Core i7-8750H (2,20 GHz, 6 núcleos, 12 threads)** com **16 GB de RAM**.
 
-No Linux ou macOS, use o Python do ambiente virtual.
+A **NVIDIA GeForce GTX 1050 Ti (4 GB de VRAM, Pascal, `sm_61`)** ficou fora da inferência. Ao tentar colocar uma camada do Huihui na GPU, o pacote CUDA do `llama.cpp` b12387 retornou `no kernel image is available for execution on the device`. O Huihui roda com a build CPU b12397 e zero camadas na GPU (`-ngl 0`). [Arquitetura da GTX 1050 Ti na tabela da NVIDIA](https://developer.nvidia.com/cuda/gpus/legacy)
+
+## English
+
+Two **CPU-only** local inference experiments. The homemade module shows how each token is selected in the terminal. The Huihui module streams output from a quantized 27-billion-parameter GGUF model.
+
+| Module | What it does |
+| --- | --- |
+| [Homemade LLM](docs/llm-caseira.md#english) · `main.py` | A Python generation loop using PyTorch and pretrained Qwen2.5-1.5B-Instruct weights. It displays tokenization, embeddings, hidden states, the KV cache, and the most likely tokens at each step. |
+| [Abliterated Huihui](huihui/README.md#english) · `huihui/main.py` | Chat with Huihui-Qwen3.8-27B-abliterated in `UD-IQ2_S` GGUF format. The Python client streams responses from a local `llama.cpp` server. |
+
+Clone the repository and follow the guide for the module you want to run.
 
 ```sh
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python main.py
+git clone https://github.com/Gabriel-Camim/LLMemCasa.git
+cd LLMemCasa
 ```
 
-## Exemplo de execução
+### Hardware
 
-Digite `Quanto e 2 mais 2?` e depois `Some 1 ao resultado anterior.` para acompanhar como o histórico entra no novo prompt. As mensagens ficam em memória durante a sessão.
+Both modules ran on Windows x64 with an **Intel Core i7-8750H (2.20 GHz, 6 cores, 12 threads)** and **16 GB of RAM**.
 
-- `historico` exibe as mensagens da sessão.
-- `limpar` reinicia a conversa com a mensagem de sistema.
-- `sair` encerra o programa.
-
-## Configuração do experimento
-
-Por padrão, a janela de contexto é de `1024` tokens, com `128` reservados para a resposta e `896` disponíveis para o prompt. As variáveis no início de `main.py` permitem ajustar esses limites e ligar ou desligar a inspeção e a lista de candidatos.
-
-A temperatura inicial é `0.7` e ajusta as probabilidades exibidas. O script usa `argmax` para escolher o token de maior probabilidade e mostra, por padrão, os `5` candidatos mais prováveis a cada passo.
+The **NVIDIA GeForce GTX 1050 Ti (4 GB VRAM, Pascal, `sm_61`)** was unused for inference. Attempting to offload one Huihui layer to the GPU with the `llama.cpp` b12387 CUDA package returned `no kernel image is available for execution on the device`. Huihui runs with the b12397 CPU build and zero GPU layers (`-ngl 0`). [NVIDIA's GPU compute capability table](https://developer.nvidia.com/cuda/gpus/legacy)

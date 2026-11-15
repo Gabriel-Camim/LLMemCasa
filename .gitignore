@@ -3,3 +3,8 @@
 .idea/
 __pycache__/
 *.py[cod]
+/llama_cpp/
+/llama_cpp_cpu/
+/huihui/modelos/
+*.gguf
+*.log
